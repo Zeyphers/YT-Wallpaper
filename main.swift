@@ -50,6 +50,7 @@ let resolutions = [480, 720, 1080, 1440, 2160]
     @Published var shuffle = false { didSet { defaults.set(shuffle, forKey: "shuffle") } }
     @Published var current: String? { didSet { defaults.set(current, forKey: "current") } }
     @Published var paused = false
+    var asleep = false, covered = false
     @Published var status = ""
 
     init() {
@@ -74,11 +75,14 @@ let resolutions = [480, 720, 1080, 1440, 2160]
         // Don't decode video nobody can see.
         let ws = NSWorkspace.shared.notificationCenter, dnc = DistributedNotificationCenter.default()
         for (c, n) in [(ws, NSWorkspace.screensDidSleepNotification), (dnc, .init("com.apple.screenIsLocked"))] as [(NotificationCenter, Notification.Name)] {
-            c.addObserver(forName: n, object: nil, queue: .main) { _ in MainActor.assumeIsolated { self.player.pause() } }
+            c.addObserver(forName: n, object: nil, queue: .main) { _ in MainActor.assumeIsolated { self.asleep = true; self.apply() } }
         }
         for (c, n) in [(ws, NSWorkspace.screensDidWakeNotification), (dnc, .init("com.apple.screenIsUnlocked"))] as [(NotificationCenter, Notification.Name)] {
-            c.addObserver(forName: n, object: nil, queue: .main) { _ in MainActor.assumeIsolated { if !self.paused { self.player.play() } } }
+            c.addObserver(forName: n, object: nil, queue: .main) { _ in MainActor.assumeIsolated { self.asleep = false; self.apply() } }
         }
+        // Also pause while every screen is hidden by fullscreen/filled windows. Polling CGWindowList is ~1ms.
+        let t = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in MainActor.assumeIsolated { self.checkCovered() } }
+        t.tolerance = 1
         DispatchQueue.main.async {
             if let v = self.videos.first(where: { $0.id == self.defaults.string(forKey: "current") }) ?? self.videos.first { self.play(v) }
         }
@@ -91,7 +95,8 @@ let resolutions = [480, 720, 1080, 1440, 2160]
         windows.forEach { $0.orderOut(nil) }
         windows = NSScreen.screens.map { screen in
             let win = NSWindow(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
-            win.level = NSWindow.Level(Int(CGWindowLevelForKey(.desktopWindow)))
+            // One above the Dock's own wallpaper (which it can briefly raise when it opens), still below desktop icons.
+            win.level = NSWindow.Level(Int(CGWindowLevelForKey(.desktopWindow)) + 1)
             win.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
             win.ignoresMouseEvents = true
             win.isReleasedWhenClosed = false
@@ -126,7 +131,7 @@ let resolutions = [480, 720, 1080, 1440, 2160]
                 }
                 player.replaceCurrentItem(with: item)
                 if seconds.isFinite, seconds > 0 { await player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600)) }
-                if !paused { player.play() }
+                apply()
                 let got = lines.count > 1 ? Int(lines[1]) ?? 0 : 0
                 status = got > 0 && got < height ? "This video tops out at \(got)p" : ""
             } catch {
@@ -147,7 +152,7 @@ let resolutions = [480, 720, 1080, 1440, 2160]
         guard !videos.isEmpty else { return stop() }
         let i = videos.firstIndex { $0.id == current } ?? -1
         if videos.count == 1, i == 0, player.currentItem != nil {
-            player.seek(to: .zero); if !paused { player.play() }; return
+            player.seek(to: .zero); apply(); return
         }
         let j = shuffle ? videos.indices.filter { $0 != i }.randomElement()! : (i + 1) % videos.count
         play(videos[j])
@@ -161,7 +166,27 @@ let resolutions = [480, 720, 1080, 1440, 2160]
 
     func togglePause() {
         paused.toggle()
-        paused ? player.pause() : player.play()
+        apply()
+    }
+
+    func apply() { paused || asleep || covered ? player.pause() : player.play() }
+
+    // A screen counts as covered when one normal window hides ≥95% of its usable area
+    // (95% because Sequoia's drag-to-top fill leaves small margins). One shared player, so pause only when all are.
+    func checkCovered() {
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        let rects = list.compactMap { w -> CGRect? in
+            guard w[kCGWindowLayer as String] as? Int == 0, (w[kCGWindowAlpha as String] as? Double ?? 1) > 0,
+                  let b = w[kCGWindowBounds as String] as? NSDictionary else { return nil }
+            return CGRect(dictionaryRepresentation: b)
+        }
+        let top = NSScreen.screens.first?.frame.maxY ?? 0
+        let all = !NSScreen.screens.isEmpty && NSScreen.screens.allSatisfy { s in
+            var v = s.visibleFrame
+            v.origin.y = top - v.maxY  // AppKit's bottom-left origin -> CGWindowList's top-left
+            return rects.contains { r in let i = r.intersection(v); return i.width * i.height >= 0.95 * v.width * v.height }
+        }
+        if all != covered { covered = all; apply() }
     }
 
     func remove(_ v: Video) {
