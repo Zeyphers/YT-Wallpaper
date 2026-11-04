@@ -5,6 +5,8 @@ import VideoToolbox
 struct Video: Codable, Identifiable, Hashable {
     let id: String
     var title: String
+    var live: Bool? = nil
+    var source: String? = nil  // a pasted live link, re-resolved on every play: 24/7 streams restart under new IDs
     var thumb: URL? { URL(string: "https://i.ytimg.com/vi/\(id)/mqdefault.jpg") }
 }
 
@@ -50,7 +52,7 @@ let resolutions = [480, 720, 1080, 1440, 2160]
     @Published var shuffle = false { didSet { defaults.set(shuffle, forKey: "shuffle") } }
     @Published var current: String? { didSet { defaults.set(current, forKey: "current") } }
     @Published var paused = false
-    var asleep = false, covered = false
+    var asleep = false, covered = false, isLive = false
     @Published var status = ""
 
     init() {
@@ -120,7 +122,7 @@ let resolutions = [480, 720, 1080, 1440, 2160]
         windows.forEach { $0.orderFront(nil) }
         Task {
             do {
-                let out = try await ytdlp(["--no-playlist", "-f", format(height), "--print", "url", "--print", "height", "--", "https://www.youtube.com/watch?v=\(v.id)"])
+                let out = try await ytdlp(["--no-playlist", "-f", format(height), "--print", "url", "--print", "height", "--print", "is_live", "--", v.source ?? "https://www.youtube.com/watch?v=\(v.id)"])
                 guard current == v.id else { return }  // user picked something else meanwhile
                 let lines = out.split(separator: "\n").map(String.init)
                 guard let first = lines.first, let url = URL(string: first) else { throw Failure("no stream URL") }
@@ -130,7 +132,8 @@ let resolutions = [480, 720, 1080, 1440, 2160]
                     if item.status == .failed { DispatchQueue.main.async { self.recover() } }
                 }
                 player.replaceCurrentItem(with: item)
-                if seconds.isFinite, seconds > 0 { await player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600)) }
+                isLive = lines.count > 2 && lines[2] == "True"
+                if !isLive, seconds.isFinite, seconds > 0 { await player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600)) }
                 apply()
                 let got = lines.count > 1 ? Int(lines[1]) ?? 0 : 0
                 status = got > 0 && got < height ? "This video tops out at \(got)p" : ""
@@ -169,7 +172,12 @@ let resolutions = [480, 720, 1080, 1440, 2160]
         apply()
     }
 
-    func apply() { paused || asleep || covered ? player.pause() : player.play() }
+    func apply() {
+        if paused || asleep || covered { return player.pause() }
+        // A live stream resumed after a pause jumps back to live instead of playing from where it stopped.
+        if isLive, player.rate == 0, let edge = player.currentItem?.seekableTimeRanges.last?.timeRangeValue.end { player.seek(to: edge) }
+        player.play()
+    }
 
     // A screen counts as covered when one normal window hides ≥95% of its usable area
     // (95% because Sequoia's drag-to-top fill leaves small margins). One shared player, so pause only when all are.
@@ -204,10 +212,13 @@ let resolutions = [480, 720, 1080, 1440, 2160]
         Task {
             do {
                 // Single videos (list= ignored) or whole playlist links.
-                let out = try await ytdlp(["--flat-playlist", "--no-playlist", "--print", "%(id)s\t%(title)s", "--", url.absoluteString])
-                let new = out.split(separator: "\n").compactMap { line -> Video? in
-                    let p = line.split(separator: "\t", maxSplits: 1).map(String.init)
-                    return p.count == 2 && !videos.contains { $0.id == p[0] } ? Video(id: p[0], title: p[1]) : nil
+                let out = try await ytdlp(["--flat-playlist", "--no-playlist", "--print", "%(id)s\t%(live_status)s\t%(fulltitle,title)s", "--", url.absoluteString])
+                let lines = out.split(separator: "\n")
+                let new = lines.compactMap { line -> Video? in
+                    let p = line.split(separator: "\t", maxSplits: 2).map(String.init)
+                    guard p.count == 3, !videos.contains(where: { $0.id == p[0] }) else { return nil }
+                    let live = p[1] == "is_live"
+                    return Video(id: p[0], title: p[2], live: live ? true : nil, source: live && lines.count == 1 ? url.absoluteString : nil)
                 }
                 videos += new
                 status = new.isEmpty ? "Already in the list" : ""
@@ -276,7 +287,7 @@ struct MenuView: View {
             }
             .pickerStyle(.segmented).labelsHidden()
             Picker("Resolution", selection: $w.height) {
-                ForEach(resolutions, id: \.self) { Text($0 == 1440 ? "2K" : $0 == 2160 ? "4K" : "\($0)p") }
+                ForEach(resolutions, id: \.self) { Text(verbatim: $0 == 1440 ? "2K" : $0 == 2160 ? "4K" : "\($0)p") }
             }
             .pickerStyle(.segmented).labelsHidden()
             HStack {
@@ -294,6 +305,12 @@ struct MenuView: View {
             AsyncImage(url: v.thumb) { $0.resizable().aspectRatio(contentMode: .fill) } placeholder: { Color.gray.opacity(0.2) }
                 .frame(width: 96, height: 54)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(alignment: .topLeading) {
+                    if v.live == true {
+                        Text("LIVE").font(.caption2.bold()).foregroundStyle(.white)
+                            .padding(.horizontal, 3).background(.red, in: RoundedRectangle(cornerRadius: 3)).padding(3)
+                    }
+                }
                 .overlay {
                     if w.current == v.id {
                         Image(systemName: w.paused ? "pause.fill" : "play.fill").foregroundStyle(.white).shadow(radius: 3)

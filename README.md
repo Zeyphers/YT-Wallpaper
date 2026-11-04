@@ -2,7 +2,7 @@
 
 A tiny macOS menu bar app that streams YouTube videos as your desktop wallpaper.
 
-- Copy a YouTube link (video or playlist), click **Paste YouTube link** in the menu bar
+- Copy a YouTube link (video, playlist, live stream or a channel's /live page), click **Paste YouTube link** in the menu bar
 - Thumbnails and titles for each video; click one to play it
 - Crop to fill / Fit / Stretch, resolution 480p–4K (2K/4K when the video has it), shuffle
 - Muted, one hardware-decoded H.264 stream shared across all displays, 30s buffer cap
