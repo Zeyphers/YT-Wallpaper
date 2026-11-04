@@ -6,7 +6,7 @@ A tiny macOS menu bar app that streams YouTube videos as your desktop wallpaper.
 - Thumbnails and titles for each video; click one to play it
 - Crop to fill / Fit / Stretch, resolution 480p–4K (2K/4K when the video has it), shuffle
 - Muted, one hardware-decoded H.264 stream shared across all displays, 30s buffer cap
-- Pauses while the screen is asleep or locked, or every screen is covered by fullscreen/filled windows; resumes where it left off when YouTube's stream link expires
+- Pauses while the screen is asleep or locked, stops drawing on a screen showing a fullscreen app, and pauses when every screen is covered; resumes where it left off when YouTube's stream link expires
 
 ## Install
 

@@ -85,6 +85,9 @@ let resolutions = [480, 720, 1080, 1440, 2160]
         // Also pause while every screen is hidden by fullscreen/filled windows. Polling CGWindowList is ~1ms.
         let t = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in MainActor.assumeIsolated { self.checkCovered() } }
         t.tolerance = 1
+        ws.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { self.checkCovered() }  // react to entering/leaving fullscreen right away
+        }
         DispatchQueue.main.async {
             if let v = self.videos.first(where: { $0.id == self.defaults.string(forKey: "current") }) ?? self.videos.first { self.play(v) }
         }
@@ -189,11 +192,18 @@ let resolutions = [480, 720, 1080, 1440, 2160]
             return CGRect(dictionaryRepresentation: b)
         }
         let top = NSScreen.screens.first?.frame.maxY ?? 0
-        let all = !NSScreen.screens.isEmpty && NSScreen.screens.allSatisfy { s in
-            var v = s.visibleFrame
+        func cover(_ r: NSRect) -> CGFloat {
+            var v = r
             v.origin.y = top - v.maxY  // AppKit's bottom-left origin -> CGWindowList's top-left
-            return rects.contains { r in let i = r.intersection(v); return i.width * i.height >= 0.95 * v.width * v.height }
+            return rects.map { let i = $0.intersection(v); return i.width * i.height / (v.width * v.height) }.max() ?? 0
         }
+        // Per screen: a screen entirely hidden (fullscreen app) stops drawing the video; the other screens keep playing.
+        for win in windows {
+            guard let layer = win.contentView?.layer as? AVPlayerLayer else { continue }
+            let hidden = cover(win.frame) >= 0.999
+            if hidden == (layer.player != nil) { layer.player = hidden ? nil : player }
+        }
+        let all = !NSScreen.screens.isEmpty && NSScreen.screens.allSatisfy { cover($0.visibleFrame) >= 0.95 }
         if all != covered { covered = all; apply() }
     }
 
