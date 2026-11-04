@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import VideoToolbox
 
 struct Video: Codable, Identifiable, Hashable {
     let id: String
@@ -16,10 +17,12 @@ enum Fill: String, CaseIterable {
 
 // Video-only H.264 over HLS: hardware-decoded, no audio downloaded, and AVPlayer can't start YouTube's
 // plain DASH .mp4 URLs (it stalls forever), so HLS first, then anything H.264, then anything.
+// YouTube only has 1440p/2160p as VP9 (software-decoded on M1/M2, so more CPU); videos without it fall back to 1080p.
 func format(_ h: Int) -> String {
-    "bv*[vcodec^=avc1][height<=\(h)][protocol^=m3u8]/bv*[vcodec^=avc1][height<=\(h)]/b[height<=\(h)]/b"
+    let vp9 = h > 1080 ? "bv*[vcodec^=vp09][height>1080][height<=\(h)][protocol^=m3u8]/" : ""
+    return vp9 + "bv*[vcodec^=avc1][height<=\(h)][protocol^=m3u8]/bv*[vcodec^=avc1][height<=\(h)]/b[height<=\(h)]/b"
 }
-let resolutions = [360, 480, 720, 1080]  // YouTube's H.264 tops out at 1080p
+let resolutions = [480, 720, 1080, 1440, 2160]
 
 @MainActor final class Wallpaper: ObservableObject {
     static let shared = Wallpaper()
@@ -54,6 +57,7 @@ let resolutions = [360, 480, 720, 1080]  // YouTube's H.264 tops out at 1080p
         fill = Fill(rawValue: defaults.string(forKey: "fill") ?? "") ?? .crop
         shuffle = defaults.bool(forKey: "shuffle")
         height = resolutions.contains(defaults.integer(forKey: "height")) ? defaults.integer(forKey: "height") : 1080
+        VTRegisterSupplementalVideoDecoderIfAvailable(kCMVideoCodecType_VP9)
         player.isMuted = true
         player.preventsDisplaySleepDuringVideoPlayback = false
 
@@ -82,6 +86,8 @@ let resolutions = [360, 480, 720, 1080]  // YouTube's H.264 tops out at 1080p
 
     // One desktop-level window per screen; all share one AVPlayer so the video is decoded once.
     func buildWindows() {
+        // The Dock moving between displays also fires this; only rebuild when the displays really changed (rebuilding flashes black).
+        guard windows.map(\.frame) != NSScreen.screens.map(\.frame) else { return }
         windows.forEach { $0.orderOut(nil) }
         windows = NSScreen.screens.map { screen in
             let win = NSWindow(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
@@ -109,9 +115,10 @@ let resolutions = [360, 480, 720, 1080]  // YouTube's H.264 tops out at 1080p
         windows.forEach { $0.orderFront(nil) }
         Task {
             do {
-                let out = try await ytdlp(["--no-playlist", "-f", format(height), "--print", "url", "--", "https://www.youtube.com/watch?v=\(v.id)"])
+                let out = try await ytdlp(["--no-playlist", "-f", format(height), "--print", "url", "--print", "height", "--", "https://www.youtube.com/watch?v=\(v.id)"])
                 guard current == v.id else { return }  // user picked something else meanwhile
-                guard let line = out.split(separator: "\n").first, let url = URL(string: String(line)) else { throw Failure("no stream URL") }
+                let lines = out.split(separator: "\n").map(String.init)
+                guard let first = lines.first, let url = URL(string: first) else { throw Failure("no stream URL") }
                 let item = AVPlayerItem(url: url)
                 item.preferredForwardBufferDuration = 30  // keep memory low on 8h videos
                 statusObs = item.observe(\.status) { item, _ in
@@ -120,7 +127,8 @@ let resolutions = [360, 480, 720, 1080]  // YouTube's H.264 tops out at 1080p
                 player.replaceCurrentItem(with: item)
                 if seconds.isFinite, seconds > 0 { await player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600)) }
                 if !paused { player.play() }
-                status = ""
+                let got = lines.count > 1 ? Int(lines[1]) ?? 0 : 0
+                status = got > 0 && got < height ? "This video tops out at \(got)p" : ""
             } catch {
                 status = "Couldn't play \(v.title): \(error.localizedDescription)"
             }
@@ -243,7 +251,7 @@ struct MenuView: View {
             }
             .pickerStyle(.segmented).labelsHidden()
             Picker("Resolution", selection: $w.height) {
-                ForEach(resolutions, id: \.self) { Text("\($0)p") }
+                ForEach(resolutions, id: \.self) { Text($0 == 1440 ? "2K" : $0 == 2160 ? "4K" : "\($0)p") }
             }
             .pickerStyle(.segmented).labelsHidden()
             HStack {
